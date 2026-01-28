@@ -1,5 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
+from scipy.optimize import curve_fit
 
 class Plotting:
     def create_signal_graphs(x, y):
@@ -28,3 +29,4 @@ class Plotting:
         plt.ylabel('Voltage (mV)')
         plt.legend()
         plt.show()
+
