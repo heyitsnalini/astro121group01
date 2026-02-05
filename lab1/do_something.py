@@ -5,24 +5,26 @@ import matplotlib.pyplot as plt
 # default_sdr = ugradio.sdr.SDR(direct = True,sample_rate = 1e6)
 # aliasing_sdr = ugradio.sdr.SDR(direct = True, fir_coeffs = np.array([0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2047]))
 
-freq = "noise"
+freq = "250khz"
 fir_on = False
 file_number=0
-voltage = "noise"
+voltage = "2.5mV+10mV"
+spacing = "+0.5khz"
 
 sample_rates = np.arange(1e6, 3.2e6, 2e5)
 for i in sample_rates:
     sampling = i
     
     if fir_on:
-        test_sdr = ugradio.sdr.SDR(direct = True,sample_rate = sampling)
+        test_sdr = ugradio.sdr.SDR(direct = True, sample_rate = sampling)
     else:
-        test_sdr = ugradio.sdr.SDR(direct = True,sample_rate = sampling, fir_coeffs = 
+        test_sdr = ugradio.sdr.SDR(direct = True, sample_rate = sampling, fir_coeffs = 
                                    np.array([0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2047]))
     
     test_data = test_sdr.capture_data(nblocks = 2)[1]
     
-    np.savez(f'a{(sampling/1e6)}e6_{freq}', data = test_data, frequency = freq, sampled_at = sampling, FIR = fir_on, vpp = voltage)
+    np.savez(f'resolution{spacing}_{freq}_{sampling/1e6}e6', data = test_data, frequency = freq, sampled_at = sampling, FIR = fir_on, vpp =
+             voltage, freq_diff = spacing)
     test_sdr.__del__()
     
     
