@@ -82,11 +82,6 @@ IDLE_SLEEP_SEC = 0.05
 # Utility functions
 # ============================================================
 
-def now_timestamp():
-    """Return a readable timestamp for filenames."""
-    return datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-
-
 def angular_sep_deg(alt1, az1, alt2, az2):
     """
     Approximate angular separation in degrees on the sky.
@@ -251,7 +246,7 @@ def save_records_chunk(records, outdir, prefix="sun_run"):
         return None
 
     os.makedirs(outdir, exist_ok=True)
-    fname = os.path.join(outdir, f"{prefix}_{now_timestamp()}_{len(records)}rec.npz")
+    fname = os.path.join(outdir, f"{prefix}_{datetime.utcnow().strftime("%Y%m%d_%H%M%S")}_{len(records)}rec.npz")
 
     # Save as object array of dicts because records may not all have identical nested structure
     flattened = [flatten_record_for_save(r) for r in records]
@@ -577,7 +572,7 @@ def sun_point(run_hours, outdir="lab3_data", prefix="sun_run", do_timing_check=T
         except Exception as e:
             print(f"[WARN] Could not stow telescope: {e}")
 
-        combined_filename = os.path.join(outdir, f"{prefix}_COMBINED_{now_timestamp()}.npz")
+        combined_filename = os.path.join(outdir, f"{prefix}_COMBINED_{datetime.utcnow().strftime("%Y%m%d_%H%M%S")}.npz")
         combine_saved_chunks(writer.saved_files, combined_filename)
 
         print(f"[DONE] Total chunk files: {len(writer.saved_files)}")
