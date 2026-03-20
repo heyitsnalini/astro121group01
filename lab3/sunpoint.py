@@ -587,22 +587,6 @@ def sun_point(run_hours, outdir="lab3_data", prefix="sun_run", do_timing_check=T
 
 
 # ============================================================
-# Optional quick test:
-# collect one cross-correlated spectrum only
-# ============================================================
-
-def collect_one_spectrum():
-    """
-    Simple single-read test for debugging.
-    """
-    spec = setup_snap()
-    data = spec.read_data()
-    acc = extract_acc_cnt(data)
-    print(f"[TEST] Single read complete. acc_cnt={acc}")
-    return data
-
-
-# ============================================================
 # Script entry point
 # ============================================================
 
