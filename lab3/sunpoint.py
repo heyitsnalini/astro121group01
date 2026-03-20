@@ -535,92 +535,48 @@ def sun_point(run_hours, outdir="lab3_data", prefix="sun_run", do_timing_check=T
         measure_acc_cnt_timing(spec, n_samples=5)
 
     # ---------- Setup background writer ----------
+    # ---------- Setup threading ----------
+    stop_event = threading.Event()
+
+    pointing_queue = queue.Queue(maxsize=1)
+
+    # Start writer (unchanged)
     writer = DataWriter(outdir=outdir, prefix=prefix)
     writer.start()
 
-    # ---------- Initial state ----------
-    records_buffer = []
-    prev_acc_cnt = None
-    n_total = 0
+    # Start pointing thread
+    point_thread = PointingThread(ifm, pointing_queue, stop_event, point_info)
+    point_thread.start()
 
-    print(f"[RUN] Starting Sun observation for {run_hours:.3f} hours.")
+    # Start data collector thread
+    collector_thread = DataCollectorThread(spec, pointing_queue, writer, stop_event)
+    collector_thread.start()
+
+    print(f"[RUN] Running Sun observation for {run_hours:.3f} hours.")
     print(f"[RUN] Output directory: {outdir}")
 
     try:
         while time.time() < t_end:
-            # ===== Part A: update pointing if the Sun has moved enough =====
-            point_info = point_to_sun(
-                ifm,
-                force=False,
-                last_alt=point_info["last_alt"],
-                last_az=point_info["last_az"],
-                last_point_time=point_info["last_point_time"],
-            )
-
-            # ===== Part B: read one NEW SNAP integration =====
-            # If prev_acc_cnt is supplied, the manual says read_data(prev_acc_cnt)
-            # should wait for the next integration so we do not reread old data.
-            if prev_acc_cnt is None:
-                snap_data = spec.read_data()
-            else:
-                snap_data = spec.read_data(prev_acc_cnt)
-
-            acc_cnt = extract_acc_cnt(snap_data)
-
-            # Record exact metadata at acquisition time
-            jd_now = ugradio.timing.julian_date()
-            unix_now = time.time()
-
-            record = {
-                "jd": jd_now,
-                "unix_time": unix_now,
-                "ra": point_info["ra"],
-                "dec": point_info["dec"],
-                "alt": point_info["alt"],
-                "az": point_info["az"],
-                "acc_cnt": acc_cnt,
-                "snap_data": snap_data,
-            }
-
-            records_buffer.append(record)
-            n_total += 1
-
-            print(
-                f"[DATA] #{n_total:05d} "
-                f"jd={jd_now:.8f} "
-                f"acc_cnt={acc_cnt} "
-                f"alt={point_info['alt']:.2f} az={point_info['az']:.2f}"
-            )
-
-            prev_acc_cnt = acc_cnt
-
-            # ===== Part C: periodically hand a chunk to the writer thread =====
-            if len(records_buffer) >= SAVE_EVERY_N_RECORDS:
-                writer.submit(records_buffer.copy())
-                records_buffer.clear()
-
-            time.sleep(IDLE_SLEEP_SEC)
+            time.sleep(1)
 
     except KeyboardInterrupt:
-        print("[RUN] KeyboardInterrupt received. Ending run early and saving what we have.")
+        print("[RUN] Interrupted.")
 
     finally:
-        # Save any remaining in-memory records
-        if len(records_buffer) > 0:
-            writer.submit(records_buffer.copy())
-            records_buffer.clear()
+        stop_event.set()
 
-        # Tell writer to finish and stop
+        point_thread.join()
+        collector_thread.join()
+
         writer.stop()
 
-        # Stow telescope at the end, as required by the lab
+        # stow telescope
         try:
             print("[IFM] Stowing telescope.")
             ifm.stow()
         except Exception as e:
-            print(f"[WARN] Could not stow telescope cleanly: {e}")
+            print(f"[WARN] Could not stow telescope: {e}")
 
-        # Combine all chunk files into one final file
         combined_filename = os.path.join(outdir, f"{prefix}_COMBINED_{now_timestamp()}.npz")
         combine_saved_chunks(writer.saved_files, combined_filename)
 
@@ -661,7 +617,7 @@ if __name__ == "__main__":
         run_hours=1.0,
         outdir="lab3_sun_data",
         prefix="sun_observation",
-        do_timing_check=True,
+        do_timing_check=False,
     )
 
     print("[MAIN] Saved chunk files:")
