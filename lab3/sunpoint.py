@@ -82,11 +82,6 @@ IDLE_SLEEP_SEC = 0.05
 # Utility functions
 # ============================================================
 
-def now_timestamp():
-    """Return a readable timestamp for filenames."""
-    return datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-
-
 def angular_sep_deg(alt1, az1, alt2, az2):
     """
     Approximate angular separation in degrees on the sky.
@@ -217,74 +212,6 @@ def convert_data_to_serializable(data):
     return {"raw_data": np.array([data], dtype=object)}
 
 
-def flatten_record_for_save(record):
-    """
-    Flatten one record dictionary into a saveable dict.
-    """
-    base = {
-        "jd": np.array(record["jd"]),
-        "unix_time": np.array(record["unix_time"]),
-        "ra_deg": np.array(record["ra"]),
-        "dec_deg": np.array(record["dec"]),
-        "alt_deg": np.array(record["alt"]),
-        "az_deg": np.array(record["az"]),
-    }
-
-    if record["acc_cnt"] is None:
-        base["acc_cnt"] = np.array([-1])
-    else:
-        base["acc_cnt"] = np.array(record["acc_cnt"])
-
-    snap_serial = convert_data_to_serializable(record["snap_data"])
-    for k, v in snap_serial.items():
-        base[f"snap_{k}"] = v
-
-    return base
-
-
-def save_records_chunk(records, outdir, prefix="sun_run"):
-    """
-    Save a list of records to one compressed NPZ file.
-    Each chunk is chronologically ordered by construction.
-    """
-    if len(records) == 0:
-        return None
-
-    os.makedirs(outdir, exist_ok=True)
-    fname = os.path.join(outdir, f"{prefix}_{now_timestamp()}_{len(records)}rec.npz")
-
-    # Save as object array of dicts because records may not all have identical nested structure
-    flattened = [flatten_record_for_save(r) for r in records]
-    np.savez_compressed(fname, records=np.array(flattened, dtype=object))
-
-    print(f"[SAVE] Wrote {len(records)} records to {fname}")
-    return fname
-
-
-def combine_saved_chunks(file_list, combined_filename):
-    """
-    Combine chunk files into one file in time order.
-    """
-    all_records = []
-
-    for fn in file_list:
-        try:
-            data = np.load(fn, allow_pickle=True)
-            chunk = list(data["records"])
-            all_records.extend(chunk)
-        except Exception as e:
-            print(f"[WARN] Could not read {fn}: {e}")
-
-    # Sort by JD if possible
-    def get_jd(rec):
-        try:
-            return float(rec["jd"])
-        except Exception:
-            return np.inf
-
-    all_records.sort(key=get_jd)
-    np.savez_compressed(combined_filename, records=np.array(all_records, dtype=object))
-    print(f"[FINAL SAVE] Combined {len(all_records)} total records into {combined_filename}")
 
 
 # ============================================================
@@ -378,7 +305,49 @@ class DataWriter(threading.Thread):
                 break
 
             try:
-                fname = save_records_chunk(item, self.outdir, prefix=self.prefix)
+                if len(item) == 0:
+                    return None
+                
+                #
+                # Save a list of records to one compressed NPZ file.
+                # Each chunk is chronologically ordered by construction.
+                #
+
+                os.makedirs(self.outdir, exist_ok=True)
+                fname = os.path.join(self.outdir, f"{self.prefix}_{datetime.utcnow().strftime("%Y%m%d_%H%M%S")}_{len(item)}rec.npz")
+
+                # Save as object array of dicts because records may not all have identical nested structure
+                flattened = []
+                for record in item:
+                    # """
+                    # Flatten one record dictionary into a saveable dict.
+                    # """
+                    base = {
+                        "jd": np.array(record["jd"]),
+                        "unix_time": np.array(record["unix_time"]),
+                        "ra_deg": np.array(record["ra"]),
+                        "dec_deg": np.array(record["dec"]),
+                        "alt_deg": np.array(record["alt"]),
+                        "az_deg": np.array(record["az"]),
+                    }
+
+                    if record["acc_cnt"] is None:
+                        base["acc_cnt"] = np.array([-1])
+                    else:
+                        base["acc_cnt"] = np.array(record["acc_cnt"])
+
+                    snap_serial = convert_data_to_serializable(record["snap_data"])
+                    for k, v in snap_serial.items():
+                        base[f"snap_{k}"] = v
+
+                    flattened.append(base)
+
+#               Save to file:
+
+                np.savez_compressed(fname, records=np.array(flattened, dtype=object))
+
+                print(f"[SAVE] Wrote {len(item)} records to {fname}")
+
                 if fname is not None:
                     self.saved_files.append(fname)
             finally:
@@ -577,8 +546,33 @@ def sun_point(run_hours, outdir="lab3_data", prefix="sun_run", do_timing_check=T
         except Exception as e:
             print(f"[WARN] Could not stow telescope: {e}")
 
-        combined_filename = os.path.join(outdir, f"{prefix}_COMBINED_{now_timestamp()}.npz")
-        combine_saved_chunks(writer.saved_files, combined_filename)
+        combined_filename = os.path.join(outdir, f"{prefix}_COMBINED_{datetime.utcnow().strftime("%Y%m%d_%H%M%S")}.npz")
+        
+        # """
+        # Combine chunk files into one file in time order.
+        # """
+
+        all_records = []
+
+        for fn in writer.saved_files:
+            try:
+                data = np.load(fn, allow_pickle=True)
+                chunk = list(data["records"])
+                all_records.extend(chunk)
+            except Exception as e:
+                print(f"[WARN] Could not read {fn}: {e}")
+
+        # Sort by JD if possible
+        def get_jd(rec):
+            try:
+                return float(rec["jd"])
+            except Exception:
+                return np.inf
+
+        all_records.sort(key=get_jd)
+        np.savez_compressed(combined_filename, records=np.array(all_records, dtype=object))
+        print(f"[FINAL SAVE] Combined {len(all_records)} total records into {combined_filename}")
+
 
         print(f"[DONE] Total chunk files: {len(writer.saved_files)}")
         print(f"[DONE] Final combined file: {combined_filename}")
