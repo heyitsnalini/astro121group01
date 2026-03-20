@@ -142,7 +142,7 @@ def point_to_sun(ifm, force=False, last_alt=None, last_az=None, last_point_time=
             should_point = True
 
     if should_point:
-        ifm.point(alt_deg, az_deg)
+        ifm.point(-alt_deg, (az_deg+180)%360)
 
         # Optional sanity check. get_pointing may return values for both dishes depending on setup.
         # We do not hard-fail if the format is different.
@@ -390,6 +390,105 @@ class DataWriter(threading.Thread):
     def stop(self):
         self.q.put(self.stop_signal)
         self.q.join()
+
+class PointingThread(threading.Thread):
+    def __init__(self, ifm, pointing_queue, stop_event, initial_point):
+        super().__init__(daemon=True)
+        self.ifm = ifm
+        self.q = pointing_queue
+        self.stop_event = stop_event
+        self.point_info = initial_point
+
+    def run(self):
+        while not self.stop_event.is_set():
+            self.point_info = point_to_sun(
+                self.ifm,
+                force=False,
+                last_alt=self.point_info["last_alt"],
+                last_az=self.point_info["last_az"],
+                last_point_time=self.point_info["last_point_time"],
+            )
+
+            # Always keep latest pointing (overwrite queue)
+            while not self.q.empty():
+                try:
+                    self.q.get_nowait()
+                except queue.Empty:
+                    break
+
+            self.q.put(self.point_info)
+            time.sleep(0.5)
+
+class DataCollectorThread(threading.Thread):
+    def __init__(self, spec, pointing_queue, writer, stop_event):
+        super().__init__(daemon=True)
+        self.spec = spec
+        self.pointing_queue = pointing_queue
+        self.writer = writer
+        self.stop_event = stop_event
+
+        self.prev_acc_cnt = None
+        self.records_buffer = []
+        self.n_total = 0
+        self.latest_point = None
+
+    def run(self):
+        while not self.stop_event.is_set():
+            # --- Get latest pointing info (non-blocking) ---
+            try:
+                self.latest_point = self.pointing_queue.get_nowait()
+            except queue.Empty:
+                pass  # keep last known
+
+            if self.latest_point is None:
+                time.sleep(IDLE_SLEEP_SEC)
+                continue
+
+            # --- Read SNAP ---
+            if self.prev_acc_cnt is None:
+                snap_data = self.spec.read_data()
+            else:
+                snap_data = self.spec.read_data(self.prev_acc_cnt)
+
+            acc_cnt = extract_acc_cnt(snap_data)
+
+            jd_now = ugradio.timing.julian_date()
+            unix_now = time.time()
+
+            record = {
+                "jd": jd_now,
+                "unix_time": unix_now,
+                "ra": self.latest_point["ra"],
+                "dec": self.latest_point["dec"],
+                "alt": self.latest_point["alt"],
+                "az": self.latest_point["az"],
+                "acc_cnt": acc_cnt,
+                "snap_data": snap_data,
+            }
+
+            self.records_buffer.append(record)
+            self.n_total += 1
+
+            print(
+                f"[DATA] #{self.n_total:05d} "
+                f"jd={jd_now:.8f} "
+                f"acc_cnt={acc_cnt} "
+                f"alt={self.latest_point['alt']:.2f} az={self.latest_point['az']:.2f}"
+            )
+
+            self.prev_acc_cnt = acc_cnt
+
+            # --- Send chunk to writer ---
+            if len(self.records_buffer) >= SAVE_EVERY_N_RECORDS:
+                self.writer.submit(self.records_buffer.copy())
+                self.records_buffer.clear()
+
+            time.sleep(IDLE_SLEEP_SEC)
+
+        # flush remaining
+        if len(self.records_buffer) > 0:
+            self.writer.submit(self.records_buffer.copy())
+            self.records_buffer.clear()
 
 
 # ============================================================
