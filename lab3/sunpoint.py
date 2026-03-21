@@ -137,7 +137,7 @@ def point_to_sun(ifm, force=False, last_alt=None, last_az=None, last_point_time=
             should_point = True
 
     if should_point:
-        ifm.point(-alt_deg, (az_deg+180)%360)
+        ifm.point(alt_deg, az_deg)
 
         # Optional sanity check. get_pointing may return values for both dishes depending on setup.
         # We do not hard-fail if the format is different.
