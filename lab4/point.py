@@ -105,12 +105,10 @@ def angular_sep_deg(alt1, az1, alt2, az2):
     return math.degrees(math.acos(cos_sep))
 
 
-def get_altaz(b, l, jd=None, lat=LAT_DEG, lon=LON_DEG, alt=ALT_M):
+def get_altaz(b, l, lat=LAT_DEG, lon=LON_DEG, alt=ALT_M):
     """
     Get alt/az from galactic coord. all should be in degrees.
     """
-    if jd is None:
-        jd = ugradio.timing.julian_date()
 
     gal = SkyCoord(l=l*u.deg, b=b*u.deg, frame=Galactic)
 
@@ -129,7 +127,7 @@ def get_altaz(b, l, jd=None, lat=LAT_DEG, lon=LON_DEG, alt=ALT_M):
     alt, az = altaz_coord.alt, altaz_coord.az
 
 
-    return jd, b, l, alt, az
+    return nt.jd, b, l, alt, az
 
 
 def point_to_sun(ifm, force=False, last_alt=None, last_az=None, last_point_time=None):
