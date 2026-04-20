@@ -130,47 +130,33 @@ def get_altaz(b, l, lat=LAT_DEG, lon=LON_DEG, alt=ALT_M):
     return alt, az, b, l, nt.jd
 
 
-def point_to_sun(ifm, force=False, last_alt=None, last_az=None, last_point_time=None):
+def point(dish, alt, az, force=False):
     """
     Compute current Sun position and repoint if needed.
     Returns updated pointing info.
     """
-    jd, ra, dec, alt_deg, az_deg = get_sun_altaz()
 
-    should_point = force
-    if last_alt is None or last_az is None:
-        should_point = True
-    else:
-        moved_deg = angular_sep_deg(last_alt, last_az, alt_deg, az_deg)
-        time_since = np.inf if last_point_time is None else (time.time() - last_point_time)
+    try:
+        dish.point(alt, az)
+        print(f"[POINT] Commanded alt={alt:.3f}, az={az:.3f}")
 
-        if moved_deg >= REPOINT_THRESHOLD_DEG or time_since >= MAX_REPOINT_INTERVAL_SEC:
-            should_point = True
+    except:
+        print(f"[POINT] Pointing failed!!!")
 
-    if should_point:
-        ifm.point(alt_deg, az_deg)
 
-        # Optional sanity check. get_pointing may return values for both dishes depending on setup.
-        # We do not hard-fail if the format is different.
-        try:
-            current_pointing = ifm.get_pointing()
-            print(f"[POINT] Commanded alt={alt_deg:.3f}, az={az_deg:.3f}")
-            print(f"[POINT] Reported pointing: {current_pointing}")
-        except Exception:
-            print(f"[POINT] Commanded alt={alt_deg:.3f}, az={az_deg:.3f}")
+    # Optional sanity check. get_pointing may return values for both dishes depending on setup.
+    # We do not hard-fail if the format is different.
+    try:
+        current_pointing = dish.get_pointing()
+        print(f"[POINT] Commanded alt={alt:.3f}, az={az:.3f}")
+        print(f"[POINT] Reported pointing: {current_pointing}")
+    except Exception:
+        print(f"[POINT] Commanded alt={alt:.3f}, az={az:.3f}")
 
-        last_alt, last_az = alt_deg, az_deg
-        last_point_time = time.time()
 
     return {
-        "jd": jd,
-        "ra": ra,
-        "dec": dec,
-        "alt": alt_deg,
-        "az": az_deg,
-        "last_alt": last_alt,
-        "last_az": last_az,
-        "last_point_time": last_point_time,
+        "alt": alt,
+        "az": az,
     }
 
 
@@ -293,70 +279,37 @@ def combine_saved_chunks(file_list, combined_filename):
     print(f"[FINAL SAVE] Combined {len(all_records)} total records into {combined_filename}")
 
 
-# ============================================================
-# Goal 3 / Goal 4: Interferometer setup and Sun tracking
-# ============================================================
 
-def setup_interferometer():
+
+def setup():
     """
     Create interferometer object, stow first, then point to the Sun.
     """
-    ifm = ugradio.interf.Interferometer()
+    dish = ugradio.leusch.LeuschTelescope()
 
-    print("[IFM] Stowing telescope first for safe start.")
-    ifm.stow()
+    print("[DISH] Stowing telescope first for safe start.")
+    dish.stow()
     time.sleep(2)
 
-    print("[IFM] Pointing to current Sun position.")
-    point_info = point_to_sun(ifm, force=True)
+    print("[DISH] Maintenance position to dump water.")
+    dish.maint()
+    time.sleep(2)
 
-    return ifm, point_info
+    point_info = point(dish)
+
+    return dish, point_info
 
 
-# ============================================================
-# Goal 5 / Goal 6 / Goal 7:
-# Read SNAP data, keep acc_cnt unique, and collect data
-# ============================================================
 
-def setup_snap():
+def setup_sdrs():
     """
-    Create and initialize the SNAP spectrometer in correlation mode.
+    Create and initialize the two SDRs.
     """
-    print("[SNAP] Initializing spectrometer.")
-    spec = UGRadioSnap(host=HOST, stream_1=STREAM_1, stream_2=STREAM_2)
-    spec.initialize(mode=MODE, sample_rate=SAMPLE_RATE)
-    return spec
+    print("[SDR] Initializing SDRs.")
+    sdr0 = SDR(device_index=0)
+    sdr1 = SDR(device_index=1)
 
-
-def measure_acc_cnt_timing(spec, n_samples=5):
-    """
-    Estimate how quickly acc_cnt increments.
-    The plan says to determine how fast SNAP is giving data.
-    """
-    print("[SNAP] Measuring acc_cnt cadence...")
-    timings = []
-    prev_acc = None
-
-    for i in range(n_samples):
-        if prev_acc is None:
-            t0 = time.time()
-            data = spec.read_data()
-            t1 = time.time()
-        else:
-            t0 = time.time()
-            data = spec.read_data(prev_acc)
-            t1 = time.time()
-
-        acc = extract_acc_cnt(data)
-        timings.append(t1 - t0)
-        prev_acc = acc
-        print(f"[SNAP] Sample {i+1}/{n_samples}: acc_cnt={acc}, wait={t1-t0:.3f} s")
-
-    if len(timings) > 0:
-        print(f"[SNAP] Mean read wait time: {np.mean(timings):.3f} s")
-        print(f"[SNAP] Median read wait time: {np.median(timings):.3f} s")
-
-    return timings
+    return sdr0, sdr1
 
 
 # ============================================================
