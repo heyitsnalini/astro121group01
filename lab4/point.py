@@ -127,7 +127,7 @@ def get_altaz(b, l, lat=LAT_DEG, lon=LON_DEG, alt=ALT_M):
     alt, az = altaz_coord.alt, altaz_coord.az
 
 
-    return nt.jd, b, l, alt, az
+    return alt, az, b, l, nt.jd
 
 
 def point_to_sun(ifm, force=False, last_alt=None, last_az=None, last_point_time=None):
