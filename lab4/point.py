@@ -31,6 +31,11 @@ import queue
 import threading
 from datetime import datetime
 
+import astropy.units as u
+from astropy.time import Time
+from astropy.coordinates import SkyCoord, Galactic, AltAz, EarthLocation
+from astropy.coordinates import get_sun
+
 import numpy as np
 import ugradio  # only works on the Raspberry Pi
 
@@ -100,23 +105,31 @@ def angular_sep_deg(alt1, az1, alt2, az2):
     return math.degrees(math.acos(cos_sep))
 
 
-def get_sun_altaz(jd=None, lat=LAT_DEG, lon=LON_DEG, alt=ALT_M):
+def get_altaz(b, l, jd=None, lat=LAT_DEG, lon=LON_DEG, alt=ALT_M):
     """
-    Get current Sun position in alt/az.
-    The lab manual specifies:
-    1. ugradio.coord.sunpos(jd) -> ra, dec
-    2. ugradio.coord.get_altaz(ra, dec, jd, lat, lon, alt)
+    Get alt/az from galactic coord. all should be in degrees.
     """
     if jd is None:
         jd = ugradio.timing.julian_date()
 
-    ra, dec = ugradio.coord.sunpos(jd)
+    gal = SkyCoord(l=l*u.deg, b=b*u.deg, frame=Galactic)
 
-    # Use the full call form from the lab manual
-    alt_deg, az_deg = ugradio.coord.get_altaz(
-        ra, dec, jd, lat, lon, alt
-    )
-    return jd, ra, dec, alt_deg, az_deg
+    # 2. Define the Observer Location and Time
+    location = EarthLocation(lat=lat*u.deg, lon=lon*u.deg, height=alt*u.m)
+
+    nt = Time.now()
+
+    
+    # 3. Create the AltAz Frame
+    altaz_frame = AltAz(obstime=nt, location=location)
+
+    # 4. Transform
+    altaz_coord = gal.transform_to(altaz_frame)
+
+    alt, az = altaz_coord.alt, altaz_coord.az
+
+
+    return jd, b, l, alt, az
 
 
 def point_to_sun(ifm, force=False, last_alt=None, last_az=None, last_point_time=None):
