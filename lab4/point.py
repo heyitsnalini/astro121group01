@@ -1,29 +1,4 @@
 # -*- coding: utf-8 -*-
-"""
-Lab 3 Collection Script
-Radio Interferometry at X-Band
-
-Completed observing script based on:
-1. The Lab 3 manual requirements
-2. Our Plan for Code for Lab 3
-3. The starter code in lab_3_collection.py
-
-Main jobs of this script:
-- connect to the interferometer and SNAP
-- point to the Sun
-- keep updating the telescope pointing during the run
-- read one new integrated spectrum per acc_cnt
-- save buffered data periodically so nothing is lost
-- stow the telescope at the end
-
-IMPORTANT:
-Run this on the Raspberry Pi that has ugradio and snap_spec installed.
-"""
-
-# ============================================================
-# Goal 1 / Goal 2: Imports and setup
-# ============================================================
-
 import os
 import time
 import math
@@ -39,27 +14,29 @@ from astropy.coordinates import get_sun
 import numpy as np
 import ugradio  # only works on the Raspberry Pi
 
-# Try both common import styles for snap_spec
-try:
-    from snap_spec.snap import UGRadioSnap
-except Exception:
-    try:
-        from snap_spec import UGRadioSnap
-    except Exception as e:
-        raise ImportError(
-            "Could not import UGRadioSnap from snap_spec. "
-            "Check that snap_spec is installed on the Raspberry Pi."
-        ) from e
-
 
 # ============================================================
 # User-configurable observing parameters
 # ============================================================
 
+AVERAGES_PER_TARGET = 15
+SECONDS_PER_AVERAGE = 1
+N_SAMPLES_PER_FFT = 1024
+
+
+SAMPLE_RATE = 2.2e6
+
+# ============================================================
+# Calculated observing parameters
+# ============================================================
+
+FFTS_PER_SEC = SAMPLE_RATE/N_SAMPLES_PER_FFT
+
+FFTS_PER_AVG = FFTS_PER_SEC * SECONDS_PER_AVERAGE
+
+
+
 HOST = "localhost"
-STREAM_1 = 0
-STREAM_2 = 1
-SAMPLE_RATE = 500
 MODE = "corr"
 
 # Berkeley interferometer site defaults
@@ -287,188 +264,48 @@ def setup():
     """
     dish = ugradio.leusch.LeuschTelescope()
 
-    print("[DISH] Stowing telescope first for safe start.")
-    dish.stow()
-    time.sleep(2)
+    # print("[DISH] Stowing telescope first for safe start.")
+    # dish.stow()
+    # time.sleep(2)
 
-    print("[DISH] Maintenance position to dump water.")
-    dish.maint()
-    time.sleep(2)
+    # print("[DISH] Maintenance position to dump water.")
+    # dish.maintenance()
+    # time.sleep(2)
 
-    point_info = point(dish)
-
-    return dish, point_info
+    return dish
 
 
 
-def setup_sdrs():
+def setup_sdrs(sample_rate=2.2e6):
     """
     Create and initialize the two SDRs.
     """
     print("[SDR] Initializing SDRs.")
-    sdr0 = SDR(device_index=0)
-    sdr1 = SDR(device_index=1)
+    sdr0 = ugradio.sdr.SDR(device_index=0, direct=False, sample_rate=sample_rate)
+    sdr1 = ugradio.sdr.SDR(device_index=1, direct=False, sample_rate=sample_rate)
 
     return sdr0, sdr1
 
 
-# ============================================================
-# Goal 8 / Goal 9:
-# Background writer thread so collection can continue while saving
-# ============================================================
-
-class DataWriter(threading.Thread):
-    """
-    Background thread that receives buffered records and writes them to disk.
-    """
-    def __init__(self, outdir, prefix="sun_run"):
-        super().__init__(daemon=True)
-        self.outdir = outdir
-        self.prefix = prefix
-        self.q = queue.Queue()
-        self.stop_signal = object()
-        self.saved_files = []
-
-    def run(self):
-        while True:
-            item = self.q.get()
-            if item is self.stop_signal:
-                self.q.task_done()
-                break
-
-            try:
-                fname = save_records_chunk(item, self.outdir, prefix=self.prefix)
-                if fname is not None:
-                    self.saved_files.append(fname)
-            finally:
-                self.q.task_done()
-
-    def submit(self, records):
-        self.q.put(records)
-
-    def stop(self):
-        self.q.put(self.stop_signal)
-        self.q.join()
-
-class PointingThread(threading.Thread):
-    def __init__(self, ifm, pointing_queue, stop_event, initial_point):
-        super().__init__(daemon=True)
-        self.ifm = ifm
-        self.q = pointing_queue
-        self.stop_event = stop_event
-        self.point_info = initial_point
-
-    def run(self):
-        while not self.stop_event.is_set():
-            self.point_info = point_to_sun(
-                self.ifm,
-                force=False,
-                last_alt=self.point_info["last_alt"],
-                last_az=self.point_info["last_az"],
-                last_point_time=self.point_info["last_point_time"],
-            )
-
-            # Always keep latest pointing (overwrite queue)
-            while not self.q.empty():
-                try:
-                    self.q.get_nowait()
-                except queue.Empty:
-                    break
-
-            self.q.put(self.point_info)
-            time.sleep(0.5)
-
-class DataCollectorThread(threading.Thread):
-    def __init__(self, spec, pointing_queue, writer, stop_event):
-        super().__init__(daemon=True)
-        self.spec = spec
-        self.pointing_queue = pointing_queue
-        self.writer = writer
-        self.stop_event = stop_event
-
-        self.prev_acc_cnt = None
-        self.records_buffer = []
-        self.n_total = 0
-        self.latest_point = None
-
-    def run(self):
-        while not self.stop_event.is_set():
-            # --- Get latest pointing info (non-blocking) ---
-            try:
-                self.latest_point = self.pointing_queue.get_nowait()
-            except queue.Empty:
-                pass  # keep last known
-
-            if self.latest_point is None:
-                time.sleep(IDLE_SLEEP_SEC)
-                continue
-
-            # --- Read SNAP ---
-            if self.prev_acc_cnt is None:
-                snap_data = self.spec.read_data()
-            else:
-                snap_data = self.spec.read_data(self.prev_acc_cnt)
-
-            acc_cnt = extract_acc_cnt(snap_data)
-
-            jd_now = ugradio.timing.julian_date()
-            unix_now = time.time()
-
-            record = {
-                "jd": jd_now,
-                "unix_time": unix_now,
-                "ra": self.latest_point["ra"],
-                "dec": self.latest_point["dec"],
-                "alt": self.latest_point["alt"],
-                "az": self.latest_point["az"],
-                "acc_cnt": acc_cnt,
-                "snap_data": snap_data,
-            }
-
-            self.records_buffer.append(record)
-            self.n_total += 1
-
-            print(
-                f"[DATA] #{self.n_total:05d} "
-                f"jd={jd_now:.8f} "
-                f"acc_cnt={acc_cnt} "
-                f"alt={self.latest_point['alt']:.2f} az={self.latest_point['az']:.2f}"
-            )
-
-            self.prev_acc_cnt = acc_cnt
-
-            # --- Send chunk to writer ---
-            if len(self.records_buffer) >= SAVE_EVERY_N_RECORDS:
-                self.writer.submit(self.records_buffer.copy())
-                self.records_buffer.clear()
-
-            time.sleep(IDLE_SLEEP_SEC)
-
-        # flush remaining
-        if len(self.records_buffer) > 0:
-            self.writer.submit(self.records_buffer.copy())
-            self.records_buffer.clear()
-
 
 # ============================================================
 # Main observing function:
-# sun_point(time)
 # ============================================================
 
-def sun_point(run_hours, outdir="lab3_data", prefix="sun_run", do_timing_check=True):
+def get_data(targets, time_limit=12, outdir="lab4_data", prefix="uhh"):
     """
     Observe the Sun for a specified number of hours.
 
     Parameters
     ----------
-    run_hours : float
-        Total observing duration in hours.
+    targets : list of tuple pairs
+        list of targets in galactic coordinates.
+    time_limit : float
+        turns telescope off after time limit
     outdir : str
         Directory for saved chunks and final combined file.
     prefix : str
         Filename prefix.
-    do_timing_check : bool
-        If True, estimate acc_cnt cadence at the start.
 
     Returns
     -------
@@ -478,71 +315,99 @@ def sun_point(run_hours, outdir="lab3_data", prefix="sun_run", do_timing_check=T
         Final combined file.
     """
 
-    run_seconds = float(run_hours) * 3600.0
+    run_seconds = float(time_limit) * 3600.0
     t_start = time.time()
     t_end = t_start + run_seconds
 
     os.makedirs(outdir, exist_ok=True)
 
     # ---------- Setup telescope ----------
-    ifm, point_info = setup_interferometer()
+    dish = setup()
 
-    # ---------- Setup SNAP ----------
-    spec = setup_snap()
+    # ---------- Setup SDRs ----------
+    sdr0, sdr1 = setup_sdrs()
 
-    if do_timing_check:
-        measure_acc_cnt_timing(spec, n_samples=5)
 
-    # ---------- Setup background writer ----------
-    # ---------- Setup threading ----------
-    stop_event = threading.Event()
-
-    pointing_queue = queue.Queue(maxsize=1)
-
-    # Start writer (unchanged)
-    writer = DataWriter(outdir=outdir, prefix=prefix)
-    writer.start()
-
-    # Start pointing thread
-    point_thread = PointingThread(ifm, pointing_queue, stop_event, point_info)
-    point_thread.start()
-
-    # Start data collector thread
-    collector_thread = DataCollectorThread(spec, pointing_queue, writer, stop_event)
-    collector_thread.start()
-
-    print(f"[RUN] Running Sun observation for {run_hours:.3f} hours.")
+    print(f"[RUN] Running observation for {time_limit:.3f} hours.")
     print(f"[RUN] Output directory: {outdir}")
 
+
+
     try:
-        while time.time() < t_end:
-            time.sleep(1)
+        for target in targets:
+            l, b = target
+            alt, az, b_, l_, jd = get_altaz(b, l)
+            point(dish, alt=alt, az=az)
+
+            target_outputs = {}
+
+            for i in np.arange(AVERAGES_PER_TARGET):    # FOR EACH AVERAGE:
+                print('Average ', i)
+                data0 = sdr0.capture_data(nsamples = N_SAMPLES_PER_FFT, nblocks=1+FFTS_PER_AVG)
+                data1 = sdr1.capture_data(nsamples = N_SAMPLES_PER_FFT, nblocks=1+FFTS_PER_AVG)
+
+                output = []
+                for data in [data0, data1]:
+                    avg = []
+                    for block in data:
+                        data_f = np.fft.fft(block)
+                        freq = np.fft.fftfreq(len(block), d=1/SAMPLE_RATE)
+                        
+                        data_f = np.fft.fftshift(data_f)
+                        freq = np.fft.fftshift(freq)
+                        
+                #         plt.hist(data)
+                        print("[RUN] Saved FFT with shape ", data_f.shape)
+
+                    avg.append(data_f)
+                    avg = np.mean(avg, axis=0)
+                    output.append(avg)
+                    print("[RUN] Saved AVERAGE with shape ", avg.shape)
+                target_outputs[i] = output
+
+                    
+                np.savez(f'{prefix}-{SAMPLE_RATE/1e6}MHz', data = target_outputs, time = time, sample_rate = SAMPLE_RATE)
+                print(f'Collecting at {SAMPLE_RATE/1e6} MHz')
+                    
+
+
 
     except KeyboardInterrupt:
         print("[RUN] Interrupted.")
 
     finally:
-        stop_event.set()
-
-        point_thread.join()
-        collector_thread.join()
-
-        writer.stop()
-
-        # stow telescope
+        # Properly close SDRs FIRST, with graceful shutdown
         try:
-            print("[IFM] Stowing telescope.")
-            ifm.stow()
+            print("[SDR] Stopping SDR capture and closing event loops.")
+            # Stop any active capture cleanly
+            if hasattr(sdr0, 'stop'):
+                sdr0.stop()
+            if hasattr(sdr1, 'stop'):
+                sdr1.stop()
+            
+            # Close with short delay to let threads finish
+            time.sleep(0.5)
+            
+            # Now close the connection
+            sdr0.__del__()
+            sdr1.__del__()
+        except Exception as e:
+            print(f"[WARN] Error closing SDRs: {e}")
+
+        try:
+            print("[DISH] Finishing and stowing telescope.")
+            dish.stow()
         except Exception as e:
             print(f"[WARN] Could not stow telescope: {e}")
 
-        combined_filename = os.path.join(outdir, f"{prefix}_COMBINED_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.npz")
-        combine_saved_chunks(writer.saved_files, combined_filename)
+        # combined_filename = os.path.join(outdir, f"{prefix}_COMBINED_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.npz")
+        # combine_saved_chunks(writer.saved_files, combined_filename)
 
-        print(f"[DONE] Total chunk files: {len(writer.saved_files)}")
-        print(f"[DONE] Final combined file: {combined_filename}")
+        # print(f"[DONE] Total chunk files: {len(writer.saved_files)}")
+        # print(f"[DONE] Final combined file: {combined_filename}")
 
-    return writer.saved_files, combined_filename
+    # return writer.saved_files, combined_filename
+
 
 
 # ============================================================
@@ -556,16 +421,15 @@ if __name__ == "__main__":
 
     # 2. Full observing run:
     # Change the hours value to what you need.
-    saved_files, combined_file = sun_point(
-        run_hours=1.0,
-        outdir="lab3_sun_data",
-        prefix="sun_observation",
-        do_timing_check=False,
+    get_data(
+        targets=[(120, 0)],
+        outdir="lab4_script_test",
+        prefix="test",
     )
 
-    print("[MAIN] Saved chunk files:")
-    for fn in saved_files:
-        print("   ", fn)
+    # print("[MAIN] Saved chunk files:")
+    # for fn in saved_files:
+    #     print("   ", fn)
 
-    print("[MAIN] Combined file:")
-    print("   ", combined_file)
+    # print("[MAIN] Combined file:")
+    # print("   ", combined_file)
