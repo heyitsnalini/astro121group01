@@ -19,7 +19,7 @@ import ugradio  # only works on the Raspberry Pi
 # User-configurable observing parameters
 # ============================================================
 
-AVERAGES_PER_TARGET = 15
+AVERAGES_PER_TARGET = 5
 SECONDS_PER_AVERAGE = 1
 N_SAMPLES_PER_FFT = 1024
 
@@ -258,10 +258,18 @@ def combine_saved_chunks(file_list, combined_filename):
 
 
 
-def setup():
-    """
-    Create interferometer object, stow first, then point to the Sun.
-    """
+# ============================================================
+# Main observing function:
+# ============================================================
+
+def get_data(targets, time_limit=12, outdir="lab4_data", prefix="uhh"):
+    run_seconds = float(time_limit) * 3600.0
+    t_start = time.time()
+    t_end = t_start + run_seconds
+
+    os.makedirs(outdir, exist_ok=True)
+
+    # ---------- Setup telescope ----------
     dish = ugradio.leusch.LeuschTelescope()
 
     # print("[DISH] Stowing telescope first for safe start.")
@@ -272,130 +280,73 @@ def setup():
     # dish.maintenance()
     # time.sleep(2)
 
-    return dish
-
-
-
-def setup_sdrs(sample_rate=2.2e6):
-    """
-    Create and initialize the two SDRs.
-    """
-    print("[SDR] Initializing SDRs.")
-    sdr0 = ugradio.sdr.SDR(device_index=0, direct=False, sample_rate=sample_rate)
-    sdr1 = ugradio.sdr.SDR(device_index=1, direct=False, sample_rate=sample_rate)
-
-    return sdr0, sdr1
-
-
-
-# ============================================================
-# Main observing function:
-# ============================================================
-
-def get_data(targets, time_limit=12, outdir="lab4_data", prefix="uhh"):
-    """
-    Observe the Sun for a specified number of hours.
-
-    Parameters
-    ----------
-    targets : list of tuple pairs
-        list of targets in galactic coordinates.
-    time_limit : float
-        turns telescope off after time limit
-    outdir : str
-        Directory for saved chunks and final combined file.
-    prefix : str
-        Filename prefix.
-
-    Returns
-    -------
-    saved_files : list of str
-        Chunk files written during the run.
-    combined_filename : str
-        Final combined file.
-    """
-
-    run_seconds = float(time_limit) * 3600.0
-    t_start = time.time()
-    t_end = t_start + run_seconds
-
-    os.makedirs(outdir, exist_ok=True)
-
-    # ---------- Setup telescope ----------
-    dish = setup()
-
     # ---------- Setup SDRs ----------
-    sdr0, sdr1 = setup_sdrs()
 
+    print("[SDR] Initializing SDRs.")
+    sdr0 = ugradio.sdr.SDR(device_index=0, direct=False, sample_rate=SAMPLE_RATE)
+    sdr1 = ugradio.sdr.SDR(device_index=1, direct=False, sample_rate=SAMPLE_RATE)
 
     print(f"[RUN] Running observation for {time_limit:.3f} hours.")
     print(f"[RUN] Output directory: {outdir}")
-
-
 
     try:
         for target in targets:
             l, b = target
             alt, az, b_, l_, jd = get_altaz(b, l)
-            point(dish, alt=alt, az=az)
+            point(dish, alt=50 , az=50)
 
             target_outputs = {}
 
-            for i in np.arange(AVERAGES_PER_TARGET):    # FOR EACH AVERAGE:
+            for i in np.arange(AVERAGES_PER_TARGET):
                 print('Average ', i)
-                data0 = sdr0.capture_data(nsamples = N_SAMPLES_PER_FFT, nblocks=1+FFTS_PER_AVG)
-                data1 = sdr1.capture_data(nsamples = N_SAMPLES_PER_FFT, nblocks=1+FFTS_PER_AVG)
+                try:
+                    # Capture data - the capture_data function handles its own event loop
+                    data0 = sdr0.capture_data(nsamples=N_SAMPLES_PER_FFT, nblocks=int(1+FFTS_PER_AVG))
+                    data1 = sdr1.capture_data(nsamples=N_SAMPLES_PER_FFT, nblocks=int(1+FFTS_PER_AVG))
 
-                output = []
-                for data in [data0, data1]:
-                    avg = []
-                    for block in data:
-                        data_f = np.fft.fft(block)
-                        freq = np.fft.fftfreq(len(block), d=1/SAMPLE_RATE)
+                    output = []
+                    for data in [data0, data1]:
+                        avg = []
+                        for block in data:
+                            data_f = np.fft.fft(block)
+                            freq = np.fft.fftfreq(len(block), d=1/SAMPLE_RATE)
+                            
+                            data_f = np.fft.fftshift(data_f)
+                            freq = np.fft.fftshift(freq)
+                            
+                            avg.append(data_f)
                         
-                        data_f = np.fft.fftshift(data_f)
-                        freq = np.fft.fftshift(freq)
-                        
-                #         plt.hist(data)
-                        print("[RUN] Saved FFT with shape ", data_f.shape)
-
-                    avg.append(data_f)
-                    avg = np.mean(avg, axis=0)
-                    output.append(avg)
-                    print("[RUN] Saved AVERAGE with shape ", avg.shape)
-                target_outputs[i] = output
-
+                        avg = np.mean(avg, axis=0)
+                        output.append(avg)
+                        print("[RUN] Saved AVERAGE with shape ", avg.shape)
                     
-                np.savez(f'{prefix}-{SAMPLE_RATE/1e6}MHz', data = target_outputs, time = time, sample_rate = SAMPLE_RATE)
-                print(f'Collecting at {SAMPLE_RATE/1e6} MHz')
+                    target_outputs[i] = output
                     
-
-
+                except Exception as e:
+                    print(f"[ERROR] Capture failed on average {i}: {e}")
+                    continue
+                
+            # Save after each target
+            np.savez(f'{prefix}-{SAMPLE_RATE/1e6}MHz', data=target_outputs, l=l, b=b, time=jd, sample_rate=SAMPLE_RATE)
+            print(f'Collecting at {SAMPLE_RATE/1e6} MHz')
 
     except KeyboardInterrupt:
         print("[RUN] Interrupted.")
 
     finally:
-        # Properly close SDRs FIRST, with graceful shutdown
+        # Shutdown SDRs properly
         try:
-            print("[SDR] Stopping SDR capture and closing event loops.")
-            # Stop any active capture cleanly
-            if hasattr(sdr0, 'stop'):
-                sdr0.stop()
-            if hasattr(sdr1, 'stop'):
-                sdr1.stop()
-            
-            # Close with short delay to let threads finish
-            time.sleep(0.5)
-            
-            # Now close the connection
-            sdr0.__del__()
-            sdr1.__del__()
+            print("[SDR] Stopping SDRs.")
+            # Let the event loop in capture_data close naturally
+            # Just close the SDR connections
+            sdr0.close()
+            sdr1.close()
+            time.sleep(0.5)  # Give threads time to die
         except Exception as e:
             print(f"[WARN] Error closing SDRs: {e}")
 
         try:
-            print("[DISH] Finishing and stowing telescope.")
+            print("[DISH] Stowing telescope.")
             dish.stow()
         except Exception as e:
             print(f"[WARN] Could not stow telescope: {e}")
@@ -422,7 +373,7 @@ if __name__ == "__main__":
     # 2. Full observing run:
     # Change the hours value to what you need.
     get_data(
-        targets=[(120, 0)],
+        targets=[(145, -20)],
         outdir="lab4_script_test",
         prefix="test",
     )
