@@ -101,9 +101,9 @@ def get_altaz(b, l, lat=LAT_DEG, lon=LON_DEG, alt=ALT_M):
     # 4. Transform
     altaz_coord = gal.transform_to(altaz_frame)
 
-    alt, az = altaz_coord.alt, altaz_coord.az
+    alt, az = altaz_coord.alt.degree, altaz_coord.az.degree
 
-
+    
     return alt, az, b, l, nt.jd
 
 
@@ -112,13 +112,14 @@ def point(dish, alt, az, force=False):
     Compute current Sun position and repoint if needed.
     Returns updated pointing info.
     """
-
+    assert type(alt) == float and type(az) == float, "alt and az aren't floats"
+    print("alt az type", type(alt), type(az))
     try:
         dish.point(alt, az)
         print(f"[POINT] Commanded alt={alt:.3f}, az={az:.3f}")
 
-    except:
-        print(f"[POINT] Pointing failed!!!")
+    except Exception as e:
+        print(f"[ERROR] Pointing failed with exception {e}")
 
 
     # Optional sanity check. get_pointing may return values for both dishes depending on setup.
@@ -127,134 +128,15 @@ def point(dish, alt, az, force=False):
         current_pointing = dish.get_pointing()
         print(f"[POINT] Commanded alt={alt:.3f}, az={az:.3f}")
         print(f"[POINT] Reported pointing: {current_pointing}")
-    except Exception:
+    except Exception as e:
         print(f"[POINT] Commanded alt={alt:.3f}, az={az:.3f}")
+        print(f"[ERROR] Could not report pointing with exception {e}")
 
 
     return {
         "alt": alt,
         "az": az,
     }
-
-
-def extract_acc_cnt(data):
-    """
-    Try several common ways of extracting acc_cnt from the SNAP output.
-    Returns None if not found.
-    """
-    # dict-like return
-    if isinstance(data, dict):
-        for key in ["acc_cnt", "acc_count", "accCnt", "count"]:
-            if key in data:
-                return data[key]
-
-    # attribute-like return
-    for attr in ["acc_cnt", "acc_count", "accCnt", "count"]:
-        if hasattr(data, attr):
-            return getattr(data, attr)
-
-    return None
-
-
-def convert_data_to_serializable(data):
-    """
-    Convert SNAP return data into something that np.savez_compressed can safely store.
-
-    We keep it flexible because the exact return type depends on the installed snap_spec version.
-    """
-    if isinstance(data, dict):
-        out = {}
-        for k, v in data.items():
-            try:
-                out[k] = np.array(v)
-            except Exception:
-                out[k] = np.array([str(v)], dtype=object)
-        return out
-
-    # For object-like returns, try reading __dict__
-    if hasattr(data, "__dict__"):
-        out = {}
-        for k, v in data.__dict__.items():
-            try:
-                out[k] = np.array(v)
-            except Exception:
-                out[k] = np.array([str(v)], dtype=object)
-        if out:
-            return out
-
-    # Fallback
-    return {"raw_data": np.array([data], dtype=object)}
-
-
-def flatten_record_for_save(record):
-    """
-    Flatten one record dictionary into a saveable dict.
-    """
-    base = {
-        "jd": np.array(record["jd"]),
-        "unix_time": np.array(record["unix_time"]),
-        "ra_deg": np.array(record["ra"]),
-        "dec_deg": np.array(record["dec"]),
-        "alt_deg": np.array(record["alt"]),
-        "az_deg": np.array(record["az"]),
-    }
-
-    if record["acc_cnt"] is None:
-        base["acc_cnt"] = np.array([-1])
-    else:
-        base["acc_cnt"] = np.array(record["acc_cnt"])
-
-    snap_serial = convert_data_to_serializable(record["snap_data"])
-    for k, v in snap_serial.items():
-        base[f"snap_{k}"] = v
-
-    return base
-
-
-def save_records_chunk(records, outdir, prefix="sun_run"):
-    """
-    Save a list of records to one compressed NPZ file.
-    Each chunk is chronologically ordered by construction.
-    """
-    if len(records) == 0:
-        return None
-
-    os.makedirs(outdir, exist_ok=True)
-    fname = os.path.join(outdir, f"{prefix}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{len(records)}rec.npz")
-
-    # Save as object array of dicts because records may not all have identical nested structure
-    flattened = [flatten_record_for_save(r) for r in records]
-    np.savez_compressed(fname, records=np.array(flattened, dtype=object))
-
-    print(f"[SAVE] Wrote {len(records)} records to {fname}")
-    return fname
-
-
-def combine_saved_chunks(file_list, combined_filename):
-    """
-    Combine chunk files into one file in time order.
-    """
-    all_records = []
-
-    for fn in file_list:
-        try:
-            data = np.load(fn, allow_pickle=True)
-            chunk = list(data["records"])
-            all_records.extend(chunk)
-        except Exception as e:
-            print(f"[WARN] Could not read {fn}: {e}")
-
-    # Sort by JD if possible
-    def get_jd(rec):
-        try:
-            return float(rec["jd"])
-        except Exception:
-            return np.inf
-
-    all_records.sort(key=get_jd)
-    np.savez_compressed(combined_filename, records=np.array(all_records, dtype=object))
-    print(f"[FINAL SAVE] Combined {len(all_records)} total records into {combined_filename}")
-
 
 
 
@@ -293,7 +175,7 @@ def get_data(targets, time_limit=12, outdir="lab4_data", prefix="uhh"):
         for target in targets:
             l, b = target
             alt, az, b_, l_, jd = get_altaz(b, l)
-            point(dish, alt=50 , az=50)
+            point(dish, alt=alt , az=az)
 
             target_outputs = {}
 
@@ -314,7 +196,7 @@ def get_data(targets, time_limit=12, outdir="lab4_data", prefix="uhh"):
                             data_f = np.fft.fftshift(data_f)
                             freq = np.fft.fftshift(freq)
                             
-                            avg.append(data_f)
+                            avg.append(np.abs(data_f)**2)
                         
                         avg = np.mean(avg, axis=0)
                         output.append(avg)
@@ -326,12 +208,22 @@ def get_data(targets, time_limit=12, outdir="lab4_data", prefix="uhh"):
                     print(f"[ERROR] Capture failed on average {i}: {e}")
                     continue
                 
+            
             # Save after each target
-            np.savez(f'{prefix}-{SAMPLE_RATE/1e6}MHz', data=target_outputs, l=l, b=b, time=jd, sample_rate=SAMPLE_RATE)
-            print(f'Collecting at {SAMPLE_RATE/1e6} MHz')
+            if not os.path.exists(outdir):
+                os.makedirs(outdir)
+
+            
+            np.savez(os.path.join(outdir, f"{prefix}-{l}deg_data.npz"), data=target_outputs, targets=targets, l=l, b=b, time=jd, sample_rate=SAMPLE_RATE,
+                     numavg=AVERAGES_PER_TARGET)
+            print(f'Collecting at {SAMPLE_RATE/1e6} MHz towards l={l}')
 
     except KeyboardInterrupt:
         print("[RUN] Interrupted.")
+
+    except Exception as e:
+        print(f"[ERROR] {e}.")
+        
 
     finally:
         # Shutdown SDRs properly
@@ -373,7 +265,7 @@ if __name__ == "__main__":
     # 2. Full observing run:
     # Change the hours value to what you need.
     get_data(
-        targets=[(145, -20)],
+        targets=[(90, 0), (120, 0)],
         outdir="lab4_script_test",
         prefix="test",
     )
