@@ -112,11 +112,13 @@ def point(dish, alt, az, force=False):
     Compute current Sun position and repoint if needed.
     Returns updated pointing info.
     """
-    assert type(alt) == float and type(az) == float, "alt and az aren't floats"
+    # assert type(alt) == float and type(az) == float, "alt and az aren't floats"
     print("alt az type", type(alt), type(az))
+    print(f'[POINT] Commanding alt={alt}, az={az}...')
+
     try:
         dish.point(alt, az)
-        print(f"[POINT] Commanded alt={alt:.3f}, az={az:.3f}")
+        print(f'[POINT] Commanded alt={alt:.3f}, az={az:.3f}')
 
     except Exception as e:
         print(f"[ERROR] Pointing failed with exception {e}")
@@ -172,10 +174,15 @@ def get_data(targets, time_limit=12, outdir="lab4_data", prefix="uhh"):
     print(f"[RUN] Output directory: {outdir}")
 
     try:
+        start = time.time()
         for target in targets:
             l, b = target
             alt, az, b_, l_, jd = get_altaz(b, l)
-            point(dish, alt=alt , az=az)
+            print(f'Collecting at {SAMPLE_RATE/1e6} MHz towards l={l}')
+            try:
+                point(dish, alt=alt , az=az)
+            except:
+                continue
 
             target_outputs = {}
 
@@ -186,19 +193,21 @@ def get_data(targets, time_limit=12, outdir="lab4_data", prefix="uhh"):
                     data0 = sdr0.capture_data(nsamples=N_SAMPLES_PER_FFT, nblocks=int(1+FFTS_PER_AVG))
                     data1 = sdr1.capture_data(nsamples=N_SAMPLES_PER_FFT, nblocks=int(1+FFTS_PER_AVG))
 
+                    data0 = data0[...,0] + 1j*data0[...,1]
+                    data1 = data1[...,0] + 1j*data1[...,1]
+
                     output = []
                     for data in [data0, data1]:
-                        avg = []
-                        for block in data:
-                            data_f = np.fft.fft(block)
-                            freq = np.fft.fftfreq(len(block), d=1/SAMPLE_RATE)
-                            
-                            data_f = np.fft.fftshift(data_f)
-                            freq = np.fft.fftshift(freq)
-                            
-                            avg.append(np.abs(data_f)**2)
+
+                        data_f = np.fft.fft(data)
                         
-                        avg = np.mean(avg, axis=0)
+                            
+                        
+                        avg = np.mean(np.abs(data_f)**2, axis=0)
+
+
+                        avg = np.fft.fftshift(avg)
+
                         output.append(avg)
                         print("[RUN] Saved AVERAGE with shape ", avg.shape)
                     
@@ -212,11 +221,14 @@ def get_data(targets, time_limit=12, outdir="lab4_data", prefix="uhh"):
             # Save after each target
             if not os.path.exists(outdir):
                 os.makedirs(outdir)
-
+            freq = np.fft.fftfreq(N_SAMPLES_PER_FFT, d=1/SAMPLE_RATE)
+            freq = np.fft.fftshift(freq)
             
-            np.savez(os.path.join(outdir, f"{prefix}-{l}deg_data.npz"), data=target_outputs, targets=targets, l=l, b=b, time=jd, sample_rate=SAMPLE_RATE,
+            np.savez(os.path.join(outdir, f"{prefix}-{l}deg_data.npz"), data=target_outputs, targets=targets, l=l, b=b, time=jd, freq=freq, sample_rate=SAMPLE_RATE,
                      numavg=AVERAGES_PER_TARGET)
-            print(f'Collecting at {SAMPLE_RATE/1e6} MHz towards l={l}')
+            
+            print(f"Averaged: {time.time() - start} seconds")
+            start = time.time()
 
     except KeyboardInterrupt:
         print("[RUN] Interrupted.")
@@ -265,9 +277,9 @@ if __name__ == "__main__":
     # 2. Full observing run:
     # Change the hours value to what you need.
     get_data(
-        targets=[(90, 0), (120, 0)],
-        outdir="lab4_script_test",
-        prefix="test",
+        targets=[(l, -4) for l in np.arange(250, 120, step=-4)], # (l, b)
+        outdir="lab4_04-27_b=-4",
+        prefix="",
     )
 
     # print("[MAIN] Saved chunk files:")
